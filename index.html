@@ -569,7 +569,32 @@
     display:inline-block;
   }
   .io-btn:hover{ border-color: var(--teal); color: var(--teal); }
+  #sync-btn.on{ border-color: var(--teal); background: var(--teal); color:#fff; }
+  #sync-btn.pending{ border-color: var(--gold); color: var(--gold); }
+
+  .sync-panel{ margin-bottom: 18px; }
+  .sync-panel textarea{
+    width:100%;
+    min-height: 90px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg);
+    font-family: monospace;
+    font-size: 12px;
+    color: var(--ink);
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    resize: vertical;
+  }
+  .sync-panel textarea:focus{ outline: 2px solid var(--teal); outline-offset: 1px; }
+  .sync-panel-actions{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .sync-status{ font-size: 12.5px; color: var(--ink-soft); }
+  .sync-status.ok{ color: var(--teal-deep); }
+  .sync-status.err{ color: var(--clay); }
+
 </style>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -577,11 +602,23 @@
   <header class="top">
     <div class="brand">tend<span>ing</span></div>
     <div class="data-io">
+      <button id="sync-btn" class="io-btn" type="button">sync: off</button>
       <button id="export-btn" class="io-btn" type="button">export</button>
       <label class="io-btn" for="import-file">import</label>
       <input type="file" id="import-file" accept="application/json" style="display:none;">
     </div>
   </header>
+
+  <div class="card sync-panel" id="sync-panel" style="display:none;">
+    <h3 class="section-title">automatic sync</h3>
+    <p class="section-sub">Paste the Firebase config from your project (the whole <code>{ ... }</code> block) to sync this device with your others. This is optional — everything still works fine without it.</p>
+    <textarea id="sync-config-input" placeholder='{ apiKey: "...", authDomain: "...", databaseURL: "...", projectId: "...", appId: "..." }'></textarea>
+    <div class="sync-panel-actions">
+      <button id="sync-connect-btn" class="io-btn" type="button">connect</button>
+      <button id="sync-disconnect-btn" class="io-btn" type="button" style="display:none;">disconnect</button>
+      <span class="sync-status" id="sync-status"></span>
+    </div>
+  </div>
 
   <nav class="tabs">
     <button class="tab-btn active" data-tab="today">today</button>
@@ -737,6 +774,7 @@
       },
       async set(key, value){
         localStorage.setItem(NS + key, value);
+        if(typeof pushToSync === 'function') pushToSync(key, value);
         return { key, value, shared: false };
       },
       async delete(key){
@@ -756,6 +794,183 @@
       }
     };
   }
+
+  // ---------- automatic sync (optional, Firebase) ----------
+  const SYNC_CONFIG_KEY = 'tending-sync-config'; // deliberately NOT under the 'tending:' data namespace
+  let syncApp = null;
+  let syncRootRef = null;
+  let syncRecentlyPushed = {}; // key -> last value we pushed, to avoid reacting to our own echo
+  let syncRefreshTimer = null;
+
+  function getSyncConfig(){
+    try{
+      const raw = localStorage.getItem(SYNC_CONFIG_KEY);
+      return raw ? JSON.parse(raw) : null;
+    }catch(e){ return null; }
+  }
+  function saveSyncConfig(cfg){
+    localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(cfg));
+  }
+  function clearSyncConfig(){
+    localStorage.removeItem(SYNC_CONFIG_KEY);
+  }
+
+  function setSyncStatus(state, message){
+    const btn = document.getElementById('sync-btn');
+    const statusEl = document.getElementById('sync-status');
+    const disconnectBtn = document.getElementById('sync-disconnect-btn');
+    if(!btn) return;
+    btn.classList.remove('on', 'pending');
+    if(state === 'on'){ btn.classList.add('on'); btn.textContent = 'sync: on'; }
+    else if(state === 'pending'){ btn.classList.add('pending'); btn.textContent = 'sync: connecting…'; }
+    else { btn.textContent = 'sync: off'; }
+    if(disconnectBtn) disconnectBtn.style.display = (state === 'off') ? 'none' : '';
+    if(statusEl){
+      statusEl.textContent = message || '';
+      statusEl.className = 'sync-status' + (state === 'on' ? ' ok' : (state === 'error' ? ' err' : ''));
+    }
+  }
+
+  function pushToSync(key, value){
+    if(!syncRootRef) return;
+    syncRecentlyPushed[key] = value;
+    syncRootRef.child(key).set(value).catch(()=>{ /* will retry next write / on reconnect */ });
+  }
+
+  function scheduleRemoteRefresh(){
+    clearTimeout(syncRefreshTimer);
+    syncRefreshTimer = setTimeout(()=>{
+      const active = document.activeElement;
+      const isTyping = active && ['INPUT','TEXTAREA'].includes(active.tagName);
+      if(isTyping){
+        scheduleRemoteRefresh(); // try again shortly rather than yanking focus mid-type
+        return;
+      }
+      refreshAllViewsFromStorage();
+    }, 600);
+  }
+
+  async function refreshAllViewsFromStorage(){
+    const savedDay = await safeGet(dayKey);
+    if(savedDay){
+      dayState = savedDay;
+      if(!dayState.topTasks) dayState.topTasks = defaultDay().topTasks;
+      if(!dayState.moreTasks) dayState.moreTasks = [];
+      if(!dayState.carryOver) dayState.carryOver = { dismissed:false, handled:[] };
+    }
+    categories = (await safeGet(CAT_KEY)) || [];
+    const savedWeek = await safeGet(weekKey);
+    if(savedWeek){ weekState = savedWeek; if(!weekState.targets) weekState.targets = []; }
+    const savedMonth = await safeGet(monthKey);
+    if(savedMonth){ monthState = savedMonth; if(!monthState.targets) monthState.targets = []; }
+
+    applyDayModeUI();
+    renderCatManager();
+    renderTopTasks();
+    renderMoreTasks();
+    loadCarryOver();
+    wireWeekTargets();
+    wireMonthTargets();
+    wireWeeklyReview();
+    wireMonthlyReview();
+    renderPastReviews();
+    renderPastMonthlyReviews();
+    renderHistory();
+    renderLot();
+  }
+
+  function attachSyncListener(){
+    syncRootRef.on('value', (snapshot)=>{
+      const remote = snapshot.val() || {};
+      let changed = false;
+      Object.keys(remote).forEach((key)=>{
+        const remoteVal = remote[key];
+        if(typeof remoteVal !== 'string') return;
+        if(syncRecentlyPushed[key] === remoteVal){
+          delete syncRecentlyPushed[key];
+          return; // this is just our own write echoing back
+        }
+        const localVal = localStorage.getItem('tending:' + key);
+        if(localVal !== remoteVal){
+          localStorage.setItem('tending:' + key, remoteVal);
+          changed = true;
+        }
+      });
+      if(changed) scheduleRemoteRefresh();
+    }, ()=>{
+      setSyncStatus('error', "Lost connection to sync — check your internet or the config, then reconnect.");
+    });
+  }
+
+  function connectSync(config, {silent} = {}){
+    if(typeof firebase === 'undefined'){
+      if(!silent) setSyncStatus('error', "Couldn't load the sync library — check your internet connection and try again.");
+      return;
+    }
+    try{
+      if(!silent) setSyncStatus('pending');
+      if(firebase.apps && firebase.apps.length){
+        firebase.apps.forEach(a=> a.delete());
+      }
+      syncApp = firebase.initializeApp(config);
+      syncRootRef = firebase.database().ref('tending-data');
+      attachSyncListener();
+      saveSyncConfig(config);
+      setSyncStatus('on', 'Connected — changes sync automatically between devices using this config.');
+    }catch(e){
+      setSyncStatus('error', 'Could not connect: ' + (e && e.message ? e.message : 'check your config and try again.'));
+    }
+  }
+
+  function disconnectSync(){
+    if(syncRootRef) syncRootRef.off();
+    if(syncApp) { try{ syncApp.delete(); }catch(e){} }
+    syncApp = null;
+    syncRootRef = null;
+    clearSyncConfig();
+    setSyncStatus('off', 'Sync disconnected. Your data stays on this device only.');
+  }
+
+  function parseFirebaseConfigText(text){
+    // Firebase's console gives a JS object literal (unquoted keys), not strict JSON —
+    // evaluate it as an expression rather than requiring the user to reformat it.
+    const trimmed = text.trim();
+    if(!trimmed) return null;
+    try{
+      const obj = new Function('return (' + trimmed + ')')();
+      if(obj && typeof obj === 'object' && obj.apiKey && obj.databaseURL) return obj;
+      return null;
+    }catch(e){ return null; }
+  }
+
+  document.getElementById('sync-btn').addEventListener('click', ()=>{
+    const panel = document.getElementById('sync-panel');
+    panel.style.display = (panel.style.display === 'none') ? '' : 'none';
+  });
+  document.getElementById('sync-connect-btn').addEventListener('click', ()=>{
+    const text = document.getElementById('sync-config-input').value;
+    const config = parseFirebaseConfigText(text);
+    if(!config){
+      setSyncStatus('error', "Couldn't read that config — paste the full { ... } block from Firebase, including apiKey and databaseURL.");
+      return;
+    }
+    connectSync(config);
+  });
+  document.getElementById('sync-disconnect-btn').addEventListener('click', ()=>{
+    if(confirm('Disconnect sync? This device will stop sharing changes with your other devices until you reconnect.')){
+      disconnectSync();
+    }
+  });
+
+  (function initSyncOnLoad(){
+    const existing = getSyncConfig();
+    if(existing){
+      document.getElementById('sync-config-input').value = JSON.stringify(existing, null, 2);
+      connectSync(existing, {silent:true});
+    } else {
+      setSyncStatus('off');
+    }
+  })();
 
   function todayISO(){
     const d = new Date();

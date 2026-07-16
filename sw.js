@@ -1,7 +1,7 @@
 // tending — service worker
 // Caches the app shell so it works offline and installs cleanly as a PWA.
 // Bump CACHE_NAME whenever index.html changes so users get the update.
-const CACHE_NAME = 'tending-cache-v2';
+const CACHE_NAME = 'tending-cache-v3';
 const APP_SHELL = [
   './',
   './index.html',
