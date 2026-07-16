@@ -574,6 +574,40 @@
     display:inline-block;
   }
   .io-btn:hover{ border-color: var(--teal); color: var(--teal); }
+
+  .cat-remove-btn{
+    border:none;
+    background:transparent;
+    color: var(--ink-soft);
+    font-size: 13px;
+    line-height:1;
+    cursor:pointer;
+    padding: 0 0 0 2px;
+  }
+  .cat-remove-btn:hover{ color: var(--clay); }
+
+  .more-tasks-header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap: 8px;
+    margin:16px 0 4px;
+    flex-wrap: wrap;
+  }
+  .more-tasks-title{
+    font-size:12.5px;
+    font-weight:600;
+    color:var(--teal-deep);
+  }
+  .sort-select{
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--bg);
+    font-family:'Inter';
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    padding: 4px 6px;
+  }
   #sync-btn.on{ border-color: var(--teal); background: var(--teal); color:#fff; }
   #sync-btn.pending{ border-color: var(--gold); color: var(--gold); }
 
@@ -668,7 +702,14 @@
       <div style="font-size:12.5px; font-weight:600; color:var(--teal-deep); margin-bottom:4px;">top 3</div>
       <div id="top-task-rows"></div>
 
-      <div style="font-size:12.5px; font-weight:600; color:var(--teal-deep); margin:16px 0 4px;">also today</div>
+      <div class="more-tasks-header">
+        <span class="more-tasks-title">also today</span>
+        <select id="task-sort-select" class="sort-select">
+          <option value="added">sort: as added</option>
+          <option value="priority">sort: priority</option>
+          <option value="category">sort: category</option>
+        </select>
+      </div>
       <div id="more-task-rows"></div>
       <button class="add-task-btn" id="add-more-task">+ add another task</button>
 
@@ -1106,10 +1147,20 @@
   function renderCatManager(){
     const wrap = document.getElementById('cat-manager');
     wrap.innerHTML = '';
+    const editableCats = viewingDate >= today;
     categories.forEach(name=>{
       const chip = document.createElement('div');
       chip.className = 'cat-chip';
       chip.innerHTML = `<span class="cat-dot" style="background:${catColor(name)}"></span>${escapeHtml(name)}`;
+      if(editableCats){
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'cat-remove-btn';
+        rm.textContent = '×';
+        rm.title = `Remove category "${name}"`;
+        rm.addEventListener('click', ()=> removeCategory(name));
+        chip.appendChild(rm);
+      }
       wrap.appendChild(chip);
     });
     if(viewingDate >= today){
@@ -1132,6 +1183,20 @@
     if(categories.some(c=>c.toLowerCase() === val.toLowerCase())){ input.value=''; return; }
     categories.push(val);
     await safeSet(CAT_KEY, categories);
+    renderCatManager();
+    renderTopTasks();
+    renderMoreTasks();
+  }
+
+  async function removeCategory(name){
+    const proceed = confirm(`Remove category "${name}"? Any tasks tagged with it will lose that tag (the tasks themselves are kept).`);
+    if(!proceed) return;
+    categories = categories.filter(c=>c!==name);
+    await safeSet(CAT_KEY, categories);
+    [...dayState.topTasks, ...dayState.moreTasks].forEach(t=>{
+      if(t.category === name) t.category = '';
+    });
+    await safeSet(dayKey, dayState);
     renderCatManager();
     renderTopTasks();
     renderMoreTasks();
@@ -1255,8 +1320,26 @@
     return `M ${so.x} ${so.y} A ${rOuter} ${rOuter} 0 ${largeArc} 0 ${eo.x} ${eo.y} L ${ei.x} ${ei.y} A ${rInner} ${rInner} 0 ${largeArc} 1 ${si.x} ${si.y} Z`;
   }
 
+  let taskSortPref = localStorage.getItem('tending-sort-pref') || 'added';
+  function priorityRank(p){
+    if(p === 'urgent') return 0;
+    if(p === 'plan') return 1;
+    if(p === 'future') return 2;
+    return 3;
+  }
+  function sortTasksByPref(tasks, mode){
+    const copy = tasks.slice();
+    if(mode === 'priority'){
+      copy.sort((a,b)=> priorityRank(a.priority) - priorityRank(b.priority));
+    } else if(mode === 'category'){
+      copy.sort((a,b)=> (a.category || '\uffff').localeCompare(b.category || '\uffff'));
+    }
+    return copy;
+  }
+
   function scheduledTaskList(){
-    return [...dayState.topTasks, ...dayState.moreTasks].filter(t=> t.text && t.text.trim());
+    const tasks = [...dayState.topTasks, ...dayState.moreTasks].filter(t=> t.text && t.text.trim());
+    return sortTasksByPref(tasks, taskSortPref);
   }
 
   // Splits a [startHour, startHour+duration) span into AM/PM segments,
@@ -1522,10 +1605,12 @@
         input.addEventListener('input', ()=>{
           dayState.topTasks[i].text = input.value;
           saveDaySoon('save-note-tasks');
+          renderScheduleRows();
         });
         sel.addEventListener('change', ()=>{
           dayState.topTasks[i].category = sel.value;
           safeSet(dayKey, dayState).then(()=>flashSaved('save-note-tasks'));
+          renderScheduleRows();
         });
       }
 
@@ -1559,8 +1644,16 @@
   function renderMoreTasks(){
     const wrap = document.getElementById('more-task-rows');
     wrap.innerHTML = '';
+    const sortSelect = document.getElementById('task-sort-select');
+    if(sortSelect) sortSelect.value = taskSortPref;
     const editable = viewingDate >= today;
-    dayState.moreTasks.forEach((t, i)=>{
+    const indexedMoreTasks = dayState.moreTasks.map((t,i)=>({t, i}));
+    if(taskSortPref === 'priority'){
+      indexedMoreTasks.sort((a,b)=> priorityRank(a.t.priority) - priorityRank(b.t.priority));
+    } else if(taskSortPref === 'category'){
+      indexedMoreTasks.sort((a,b)=> (a.t.category || '\uffff').localeCompare(b.t.category || '\uffff'));
+    }
+    indexedMoreTasks.forEach(({t, i})=>{
       const row = document.createElement('div');
       row.className = 'task-row';
       row.style.borderLeftColor = t.priority ? priorityColor(t.priority) : 'transparent';
@@ -1590,10 +1683,12 @@
         input.addEventListener('input', ()=>{
           dayState.moreTasks[i].text = input.value;
           saveDaySoon('save-note-tasks');
+          renderScheduleRows();
         });
         sel.addEventListener('change', ()=>{
           dayState.moreTasks[i].category = sel.value;
           safeSet(dayKey, dayState).then(()=>flashSaved('save-note-tasks'));
+          renderScheduleRows();
         });
       }
 
@@ -1653,6 +1748,12 @@
     btn.disabled = atMax;
     btn.textContent = atMax ? 'that\'s 20 for that day — plenty' : '+ add another task';
   }
+
+  document.getElementById('task-sort-select').addEventListener('change', (e)=>{
+    taskSortPref = e.target.value;
+    localStorage.setItem('tending-sort-pref', taskSortPref);
+    renderMoreTasks();
+  });
 
   document.getElementById('add-more-task').addEventListener('click', ()=>{
     if(dayState.moreTasks.length >= MAX_MORE_TASKS) return;
