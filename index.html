@@ -49,6 +49,8 @@
 
   header.top{
     display:flex;
+    flex-wrap: wrap;
+    row-gap: 10px;
     align-items:baseline;
     justify-content:space-between;
     margin-bottom: 18px;
@@ -555,7 +557,10 @@
   .sched-clear:hover{ color: var(--clay); }
   .sched-static{ font-size: 12.5px; color: var(--ink-soft); flex-shrink:0; }
 
-  .data-io{ display:flex; gap:8px; align-items:center; }
+  .data-io{ display:flex; flex-wrap: wrap; gap:8px; align-items:center; }
+  @media (max-width: 420px){
+    .io-btn{ font-size: 11px; padding: 6px 9px; }
+  }
   .io-btn{
     border: 1px solid var(--line);
     background: var(--surface);
@@ -611,7 +616,7 @@
 
   <div class="card sync-panel" id="sync-panel" style="display:none;">
     <h3 class="section-title">automatic sync</h3>
-    <p class="section-sub">Paste the Firebase config from your project (the whole <code>{ ... }</code> block) to sync this device with your others. This is optional — everything still works fine without it.</p>
+    <p class="section-sub">Paste the Firebase config from your project here — the whole code block Firebase gives you is fine, no need to trim it. This is optional — everything still works fine without it.</p>
     <textarea id="sync-config-input" placeholder='{ apiKey: "...", authDomain: "...", databaseURL: "...", projectId: "...", appId: "..." }'></textarea>
     <div class="sync-panel-actions">
       <button id="sync-connect-btn" class="io-btn" type="button">connect</button>
@@ -932,10 +937,17 @@
   }
 
   function parseFirebaseConfigText(text){
-    // Firebase's console gives a JS object literal (unquoted keys), not strict JSON —
-    // evaluate it as an expression rather than requiring the user to reformat it.
-    const trimmed = text.trim();
+    // Firebase's console gives a full snippet like:
+    //   const firebaseConfig = { apiKey: "...", ... };
+    // Be forgiving: pull out just the { ... } object, whether the person pasted
+    // the whole snippet or just the object itself.
+    let trimmed = text.trim();
     if(!trimmed) return null;
+    const firstBrace = trimmed.indexOf('{');
+    const lastBrace = trimmed.lastIndexOf('}');
+    if(firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace){
+      trimmed = trimmed.slice(firstBrace, lastBrace + 1);
+    }
     try{
       const obj = new Function('return (' + trimmed + ')')();
       if(obj && typeof obj === 'object' && obj.apiKey && obj.databaseURL) return obj;
